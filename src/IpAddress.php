@@ -137,21 +137,15 @@ class IpAddress implements MiddlewareInterface
      * the proxy header (X-Forwarded-For or from $_SERVER['REMOTE_ADDR']
      *
      * @param ServerRequestInterface $request PSR7 request
-     * @param ResponseInterface $response     PSR7 response
-     * @param callable $next                  Next middleware
-     *
+     * @param RequestHandlerInterface $handler
      * @return ResponseInterface
      */
-    public function __invoke(ServerRequestInterface $request, ResponseInterface $response, $next)
+    public function __invoke(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
     {
-        if (!$next) {
-            return $response;
-        }
-
         $ipAddress = $this->determineClientIpAddress($request);
         $request = $request->withAttribute($this->attributeName, $ipAddress);
 
-        return $response = $next($request, $response);
+        return $handler->handle($request);
     }
 
     /**

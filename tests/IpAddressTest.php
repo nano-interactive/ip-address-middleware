@@ -15,11 +15,28 @@ class RendererTest extends TestCase
     {
         $request = ServerRequestFactory::fromGlobals($env);
         $attributeValue = '__DUMMY_VALUE__';
-        $middleware($request, new Response(), function ($request, $response) use (&$attributeValue, $attrName) {
-            $attributeValue = $request->getAttribute($attrName);
-            return $response;
+
+        $response = $middleware($request, new class($attrName) implements RequestHandlerInterface {
+            private $attributeName;
+
+            public function __construct(string $attributeName)
+            {
+                $this->attributeName = $attributeName;
+            }
+
+            public function handle(ServerRequestInterface $request): ResponseInterface
+            {
+                $attributeValue = $request->getAttribute($this->attributeName);
+
+                if ($attributeValue === null) {
+                    return new Response();
+                }
+
+                return (new Response())->withAddedHeader('X-ATTR-VALUE', $request->getAttribute($this->attributeName));
+            }
         });
-        return $attributeValue;
+
+        return $response->getHeader('X-ATTR-VALUE')[0] ?? null;
     }
 
     public function testIpSetByRemoteAddr()
@@ -271,14 +288,28 @@ class RendererTest extends TestCase
             'REMOTE_ADDR' => '192.168.0.1',
         ]);
         $request = $request->withAddedHeader('Foo-Bar', '192.168.1.3');
-        $response = new Response();
 
-        $ipAddress = '123';
-        $response  = $middleware($request, $response, function ($request, $response) use (&$ipAddress) {
-            // simply store the "ip_address" attribute in to the referenced $ipAddress
-            $ipAddress = $request->getAttribute('ip_address');
-            return $response;
+        $response = $middleware($request, new class('ip_address') implements RequestHandlerInterface {
+            private $attributeName;
+
+            public function __construct(string $attributeName)
+            {
+                $this->attributeName = $attributeName;
+            }
+
+            public function handle(ServerRequestInterface $request): ResponseInterface
+            {
+                return (new Response())->withAddedHeader('X-ATTR-VALUE', $request->getAttribute($this->attributeName));
+            }
         });
+
+        $ipAddress = $response->getHeader('X-ATTR-VALUE')[0] ?? '';
+
+//        $response  = $middleware($request, $response, function ($request, $response) use (&$ipAddress) {
+//            // simply store the "ip_address" attribute in to the referenced $ipAddress
+//            $ipAddress = $request->getAttribute('ip_address');
+//            return $response;
+//        });
 
         $this->assertSame('192.168.1.3', $ipAddress);
     }
