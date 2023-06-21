@@ -33,14 +33,14 @@ class IpAddress implements MiddlewareInterface
      *
      * @var array
      */
-    protected $trustedWildcard;
+    protected $trustedWildcards;
 
     /**
      * List of trusted proxy IP CIDR ranges
      *
      * @var array
      */
-    protected $trustedCidr;
+    protected $trustedCidrs;
 
     /**
      * Name of the attribute added to the ServerRequest object
@@ -86,23 +86,10 @@ class IpAddress implements MiddlewareInterface
             foreach ($trustedProxies as $proxy) {
                 if (strpos($proxy, '*') !== false) {
                     // Wildcard IP address
-                    // IPv6 is 8 parts separated by ':'
-                    if (strpos($proxy, '.') > 0) {
-                        $delim = '.';
-                        $parts = 4;
-                    } else {
-                        $delim = ':';
-                        $parts = 8;
-                    }
-                    $this->trustedWildcard[] = explode($delim, $proxy, $parts);
+                    $this->trustedWildcards[] = $this->parseWildcard($proxy);
                 } elseif (strpos($proxy, '/') > 6) {
                     // CIDR notation
-                    list($subnet, $bits) = explode('/', $proxy, 2);
-                    $subnet = ip2long($subnet);
-                    $mask = -1 << (32 - $bits);
-                    $min = $subnet & $mask;
-                    $max = $subnet | ~$mask;
-                    $this->trustedCidr[] = [$min, $max];
+                    $this->trustedCidrs[] = $this->parseCidr($proxy);
                 } else {
                     // String-match IP address
                     $this->trustedProxies[] = $proxy;
@@ -113,9 +100,44 @@ class IpAddress implements MiddlewareInterface
         if ($attributeName) {
             $this->attributeName = $attributeName;
         }
+
         if (!empty($headersToInspect)) {
             $this->headersToInspect = $headersToInspect;
         }
+    }
+
+    /**
+     * @param string $ipAddress
+     * @return array
+     */
+    private function parseWildcard(string $ipAddress)
+    {
+        // IPv4 has 4 parts separated by '.'
+        // IPv6 has 8 parts separated by ':'
+        if (strpos($ipAddress, '.') > 0) {
+            $delim = '.';
+            $parts = 4;
+        } else {
+            $delim = ':';
+            $parts = 8;
+        }
+
+        return explode($delim, $ipAddress, $parts);
+    }
+
+    /**
+     * @param string $ipAddress
+     * @return array
+     */
+    private function parseCidr(string $ipAddress)
+    {
+        list($subnet, $bits) = explode('/', $ipAddress, 2);
+        $subnet = ip2long($subnet);
+        $mask = -1 << (32 - $bits);
+        $min = $subnet & $mask;
+        $max = $subnet | ~$mask;
+
+        return [$min, $max];
     }
 
     /**
@@ -156,7 +178,7 @@ class IpAddress implements MiddlewareInterface
      */
     protected function determineClientIpAddress($request)
     {
-        $ipAddress = null;
+        $ipAddress = '';
 
         $serverParams = $request->getServerParams();
         if (isset($serverParams['REMOTE_ADDR'])) {
@@ -166,16 +188,15 @@ class IpAddress implements MiddlewareInterface
             }
         }
 
-        $checkProxyHeaders = $this->checkProxyHeaders;
-        if ($checkProxyHeaders) {
+        $checkProxyHeaders = false;
+        if ($this->checkProxyHeaders) {
             // Exact Match
-            if ($this->trustedProxies && !in_array($ipAddress, $this->trustedProxies)) {
-                $checkProxyHeaders = false;
+            if ($this->trustedProxies && in_array($ipAddress, $this->trustedProxies)) {
+                $checkProxyHeaders = true;
             }
 
             // Wildcard Match
-            if ($checkProxyHeaders && $this->trustedWildcard) {
-                $checkProxyHeaders = false;
+            if ($this->checkProxyHeaders && $this->trustedWildcards) {
                 // IPv4 has 4 parts separated by '.'
                 // IPv6 has 8 parts separated by ':'
                 if (strpos($ipAddress, '.') > 0) {
@@ -185,28 +206,32 @@ class IpAddress implements MiddlewareInterface
                     $delim = ':';
                     $parts = 8;
                 }
+
                 $ipAddrParts = explode($delim, $ipAddress, $parts);
-                foreach ($this->trustedWildcard as $proxy) {
+                foreach ($this->trustedWildcards as $proxy) {
                     if (count($proxy) !== $parts) {
                         continue; // IP version does not match
                     }
+                    $match = true;
                     foreach ($proxy as $i => $part) {
                         if ($part !== '*' && $part !== $ipAddrParts[$i]) {
-                            break 2;// IP does not match, move to next proxy
+                            $match = false;
+                            break; // IP does not match, move to next proxy
                         }
                     }
-                    $checkProxyHeaders = true;
-                    break;
+                    if ($match) {
+                        $checkProxyHeaders = true;
+                        break;
+                    }
                 }
             }
 
             // CIDR Match
-            if ($checkProxyHeaders && $this->trustedCidr) {
-                $checkProxyHeaders = false;
+            if ($this->checkProxyHeaders && $this->trustedCidrs) {
                 // Only IPv4 is supported for CIDR matching
                 $ipAsLong = ip2long($ipAddress);
                 if ($ipAsLong) {
-                    foreach ($this->trustedCidr as $proxy) {
+                    foreach ($this->trustedCidrs as $proxy) {
                         if ($proxy[0] <= $ipAsLong && $ipAsLong <= $proxy[1]) {
                             $checkProxyHeaders = true;
                             break;
@@ -214,18 +239,26 @@ class IpAddress implements MiddlewareInterface
                     }
                 }
             }
-        }
 
-        if ($checkProxyHeaders) {
-            foreach ($this->headersToInspect as $header) {
-                if ($request->hasHeader($header)) {
-                    $ip = $this->getFirstIpAddressFromHeader($request, $header);
-                    if ($this->isValidIpAddress($ip)) {
-                        $ipAddress = $ip;
-                        break;
+            if (!$this->trustedProxies && !$this->trustedWildcards && !$this->trustedCidrs) {
+                $checkProxyHeaders = true;
+            }
+
+            if ($checkProxyHeaders) {
+                foreach ($this->headersToInspect as $header) {
+                    if ($request->hasHeader($header)) {
+                        $ip = $this->getFirstIpAddressFromHeader($request, $header);
+                        if ($this->isValidIpAddress($ip)) {
+                            $ipAddress = $ip;
+                            break;
+                        }
                     }
                 }
             }
+        }
+
+        if (empty($ipAddress)) {
+            $ipAddress = null;
         }
 
         return $ipAddress;
@@ -263,6 +296,7 @@ class IpAddress implements MiddlewareInterface
         if (filter_var($ip, FILTER_VALIDATE_IP, $flags) === false) {
             return false;
         }
+
         return true;
     }
 

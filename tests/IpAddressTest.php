@@ -9,7 +9,7 @@ use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\RequestHandlerInterface;
 use RKA\Middleware\IpAddress;
 
-class RendererTest extends TestCase
+class IpAddressTest extends TestCase
 {
     private function simpleRequest(IPAddress $middleware, $env, $attrName = 'ip_address')
     {
@@ -145,6 +145,16 @@ class RendererTest extends TestCase
         $this->assertNull($ipAddress);
     }
 
+    public function testIpIsNullIfMissingAndProxiesAreConfigured()
+    {
+        error_reporting(-1);
+        $middleware = new IPAddress(true, ['*'], 'IP');
+        $env = [];
+        $ipAddress = $this->simpleRequest($middleware, $env, 'IP');
+
+        $this->assertSame(null, $ipAddress);
+    }
+
     public function testXForwardedForIp()
     {
         $middleware = new IPAddress(true, []);
@@ -169,7 +179,7 @@ class RendererTest extends TestCase
         $this->assertSame('192.168.1.3', $ipAddress);
     }
 
-    public function testProxyIpIsIgnored()
+    public function testProxyIpIsIgnoredWhenNoArgumentsProvided()
     {
         $middleware = new IPAddress();
         $env = [
@@ -314,7 +324,6 @@ class RendererTest extends TestCase
         $this->assertSame('192.168.1.3', $ipAddress);
     }
 
-
     public function testPSR15()
     {
         $middleware = new IPAddress();
@@ -334,6 +343,53 @@ class RendererTest extends TestCase
         $response = $middleware->process($request, $handler);
 
         $this->assertSame("Hello World", (string) $response->getBody());
+    }
+
+    public function testIpCidrListMatch()
+    {
+        $matches = [
+            '192.16.238.184/24', // negative match
+            '10.11.0.0/16', // positive match
+        ];
+        $middleware = new IPAddress(true, $matches);
+        $env = [
+            'REMOTE_ADDR' => '10.11.156.95',
+            'HTTP_X_FORWARDED_FOR' => '123.4.5.6',
+        ];
+        $ipAddress = $this->simpleRequest($middleware, $env);
+        $this->assertSame('123.4.5.6', $ipAddress, "Testing CIDR: " . implode(', ', $matches));
+    }
+
+    public function testIp4WildcardsMatch()
+    {
+        $matches = [
+            '192.168.*.*', // negative match
+            '10.0.238.*', // negative match
+            '10.11.*.*', // positive match
+        ];
+        $middleware = new IPAddress(true, $matches);
+        $env = [
+            'REMOTE_ADDR' => '10.11.156.95',
+            'HTTP_X_FORWARDED_FOR' => '123.4.5.6',
+        ];
+        $ipAddress = $this->simpleRequest($middleware, $env);
+        $this->assertSame('123.4.5.6', $ipAddress, "Testing wildcard: " . implode(', ', $matches));
+    }
+
+    public function testIp4MultipleTypesMatch()
+    {
+        $matches = [
+            '192.168.0.1', // negative match
+            '10.0.238.*', // negative match
+            '10.11.0.0/16', // positive match
+        ];
+        $middleware = new IPAddress(true, $matches);
+        $env = [
+            'REMOTE_ADDR' => '10.11.156.95',
+            'HTTP_X_FORWARDED_FOR' => '123.4.5.6',
+        ];
+        $ipAddress = $this->simpleRequest($middleware, $env);
+        $this->assertSame('123.4.5.6', $ipAddress, "Testing proxies: " . implode(', ', $matches));
     }
 
     public function testNotGivingAProxyListShouldThrowException()
